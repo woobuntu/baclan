@@ -1,4 +1,5 @@
 import { uniq } from "lodash";
+import axios from "axios";
 
 export interface IsSpamParams {
   content: string;
@@ -11,20 +12,141 @@ const extractUrls = (text: string) => {
   return uniq(urls) || [];
 };
 
-export const isSpam = (params: IsSpamParams): Promise<boolean> => {
-  // 1. content에서 url 식별
-  const urls = extractUrls(params.content);
-  // content 자체에 url이 없으면 스팸이 아니다.
-  if (urls.length == 0) return new Promise((resolve) => resolve(false));
+const urlIncludesDomains = ({
+  url,
+  spamLinkDomains,
+}: {
+  url: string;
+  spamLinkDomains: string[];
+}) => {
+  return spamLinkDomains.some((spamLinkDomain) => url.includes(spamLinkDomain));
+};
 
-  // 2. 해당 url이 spamLinkDomain인지 확인
+export const isSpam = async (params: IsSpamParams): Promise<boolean> => {
+  const { content, spamLinkDomains, redirectDepth } = params;
+  // 1. content에서 url 식별
+  const urls = extractUrls(content);
+  // content 자체에 url이 없으면 스팸이 아니다.
+  if (urls.length == 0) return false;
+
+  const visitedLinksHash: Record<string, boolean> = {};
+
   for (const url of urls) {
-    if (params.spamLinkDomains.includes(url))
-      return new Promise((resolve) => resolve(true));
+    const result = await isUrlSpam({
+      url,
+      spamLinkDomains,
+      redirectDepth,
+      visitedLinksHash,
+    });
+
+    if (result) return true;
   }
 
-  // 3. spamLinkDomain이 아니라면 요청하여 리다이렉션 여부 확인
-  // 4. 리다이렉션된 페이지가 spamLinkDomain인지 확인
-  // 5. 라디이렉션된 페이지가 spamLinkDomain을 포함하고 있는지 확인
-  // 3~5까지는 리다이렉션 뎁스에 대해 재귀 적용 필요
+  return false;
 };
+
+type IsUrlSpamParams = Omit<IsSpamParams, "content"> & {
+  url: string;
+  visitedLinksHash: Record<string, boolean>;
+};
+
+const isUrlSpam = async (params: IsUrlSpamParams) => {
+  const { spamLinkDomains, url, redirectDepth, visitedLinksHash } = params;
+
+  // url 자체가 스팸 링크인지 확인
+  if (
+    urlIncludesDomains({
+      url,
+      spamLinkDomains,
+    })
+  )
+    return true;
+
+  // url 자체가 스팸 링크는 아니므로 요청
+  try {
+    const response = await axios.get(url, {
+      maxRedirects: redirectDepth,
+    });
+
+    // 리다이렉트된 페이지가 스팸 링크인지 확인
+    if (
+      response.request?.res?.responseUrl &&
+      urlIncludesDomains({
+        url: response.request.res.responseUrl,
+        spamLinkDomains,
+      })
+    )
+      return true;
+
+    // 리다이렉트된 페이지에 스팸 링크가 포함되어 있으면 스팸
+    const linksInHtml = extractUrls(response.data);
+    const linksInHtmlNotVisited = linksInHtml.filter(
+      (link) => !visitedLinksHash[link]
+    );
+    if (
+      linksInHtmlNotVisited.some((link) =>
+        urlIncludesDomains({
+          url: link,
+          spamLinkDomains,
+        })
+      )
+    )
+      return true;
+
+    // 이 시점까지 스팸 링크가 없고, 리다이렉트 뎁쓰가 남아 있으면 추가 요청
+    if (redirectDepth > 0) {
+      for (const link in linksInHtmlNotVisited) {
+        const result = await isUrlSpam({
+          url: link,
+          spamLinkDomains,
+          redirectDepth: redirectDepth - 1,
+          visitedLinksHash,
+        });
+
+        // 나열된 것 중 하나라도 스팸 링크가 포함되어 있다면 그 즉시 스팸임을 반환
+        if (result === true) return true;
+      }
+    }
+  } catch (error) {
+    // maxRedirect에 걸려서 에러가 발생한 케이스로, maxRedirect에 걸린 시점의 url이 스팸 링크인지 확인
+    if (
+      urlIncludesDomains({
+        url: (error as any).request._currentUrl,
+        spamLinkDomains,
+      })
+    )
+      return true;
+  }
+  visitedLinksHash[url] = true;
+  return false;
+};
+
+// 테스트
+(async function () {
+  //   const result = await isSpam({
+  //     content: "spam spam https://moimingg.page.link/exam?_icmp=1",
+  //     spamLinkDomains: ["docs.github.com"],
+  //     redirectDepth: 1,
+  //   });
+  //   const result = await isSpam({
+  //     content: "spam spam https://moimingg.page.link/exam?_icmp=1",
+  //     spamLinkDomains: ["moimingg.page.link"],
+  //     redirectDepth: 1,
+  //   });
+  //   const result = await isSpam({
+  //     content: "spam spam https://moimingg.page.link/exam?_icmp=1",
+  //     spamLinkDomains: ["github.com"],
+  //     redirectDepth: 2,
+  //   });
+  //   const result = await isSpam({
+  //     content: "spam spam https://moimingg.page.link/exam?_icmp=1",
+  //     spamLinkDomains: ["docs.github.com"],
+  //     redirectDepth: 2,
+  //   });
+  //   const result = await isSpam({
+  //     content: "spam spam https://moimingg.page.link/exam?_icmp=1",
+  //     spamLinkDomains: ["docs.github.com"],
+  //     redirectDepth: 3,
+  //   });
+  //   console.log(result);
+})();

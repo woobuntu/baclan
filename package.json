@@ -9,6 +9,7 @@
     "ts-node": "^10.9.2"
   },
   "devDependencies": {
-    "@types/lodash": "^4.17.13"
+    "@types/lodash": "^4.17.13",
+    "typescript": "^5.6.3"
   }
 }
